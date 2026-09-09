@@ -10,7 +10,7 @@
 //!
 //! Nothing here knows what a method means; that is `method.rs`.
 
-use std::io::{BufRead, Read};
+use std::io::BufRead;
 
 use transport::error::{Result, classify, protocol_error};
 
@@ -291,7 +291,7 @@ pub fn table(bytes: &[u8]) -> Result<Vec<(String, String)>> {
         let key = reader.short_string()?;
         let value = match reader.octet()? {
             b'S' => text(&reader.long_string()?)?,
-            b'I' => (reader.long()? as i32).to_string(),
+            b'I' => reader.long()?.cast_signed().to_string(),
             b't' => (reader.octet()? != 0).to_string(),
             b'F' => {
                 let nested = reader.long_string()?;
@@ -317,7 +317,9 @@ mod tests {
         assert_eq!(&bytes[1..3], &[0, 1]);
         assert_eq!(&bytes[3..7], &[0, 0, 0, 4]);
         assert_eq!(*bytes.last().expect("frame end"), FRAME_END);
-        let back = read_frame(&mut bytes.as_slice()).expect("read").expect("one");
+        let back = read_frame(&mut bytes.as_slice())
+            .expect("read")
+            .expect("one");
         assert_eq!(back, frame);
         assert!(read_frame(&mut &b""[..]).expect("closed").is_none());
         assert_eq!(Kind::of(8), Some(Kind::Heartbeat));
@@ -326,7 +328,10 @@ mod tests {
 
     #[test]
     fn what_is_not_amqp_is_refused() {
-        assert!(read_frame(&mut &b"AMQP\x00\x00\x09\x01"[..]).is_err(), "type");
+        assert!(
+            read_frame(&mut &b"AMQP\x00\x00\x09\x01"[..]).is_err(),
+            "type"
+        );
         let mut bad_end = Frame::new(Kind::Body, 1, vec![7]).encode();
         *bad_end.last_mut().expect("last") = 0;
         assert!(read_frame(&mut bad_end.as_slice()).is_err(), "frame end");
