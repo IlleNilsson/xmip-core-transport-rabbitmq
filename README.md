@@ -1,6 +1,13 @@
 # xmip-core-transport-rabbitmq
 
-RabbitMQ transport: AMQP 0-9-1 with PLAIN login — declare, publish with a content header, consume and acknowledge — a queue is a Location and every delivery is one Stream. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
+RabbitMQ transport: RabbitMQ's idiom over the amqp technology's AMQP 0-9-1 — a queue is a Location, published to through the default exchange, declared durable first and every message persistent — and every delivery is one Stream. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
+
+The protocol is not written here. The frame, the methods, the content, the
+client and the far-end session are
+[xmip-core-transport-amqp](https://github.com/IlleNilsson/xmip-core-transport-amqp)'s,
+the one AMQP 0-9-1 in the estate; this crate keeps what is RabbitMQ's own:
+the queue as the Location, the `rabbitmq://` URIs, and declaring and
+persisting before it publishes.
 
 ## Toolchain
 

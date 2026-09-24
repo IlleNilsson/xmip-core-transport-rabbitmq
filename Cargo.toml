@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/IlleNilsson/xmip-core-transport-rabbitmq"
-description = "RabbitMQ transport: AMQP 0-9-1 with PLAIN login — declare, publish with a content header, consume and acknowledge — a queue is a Location and every delivery is one Stream. A xmip-core-transport technology."
+description = "RabbitMQ transport: RabbitMQ's idiom over the amqp technology's AMQP 0-9-1 — a queue is a Location, published to through the default exchange, declared durable first and every message persistent — and every delivery is one Stream. A xmip-core-transport technology."
 publish = false
 
 [lib]
@@ -15,9 +15,13 @@ path = "src/lib.rs"
 
 [dependencies]
 # A Technology depends on its parent Capability, never the reverse
-# (repository-model.md). Standard library otherwise: AMQP 0-9-1 is a frame
-# header, a few method arguments and a body, all of it big-endian integers.
+# (repository-model.md).
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# The protocol: the one AMQP 0-9-1 in the estate — frame, methods,
+# content, the client and the far-end session. What is RabbitMQ's own is
+# the idiom this crate speaks through it (a declared sibling dependency,
+# architecture.toml).
+amqp = { package = "xmip-core-transport-amqp", git = "https://github.com/IlleNilsson/xmip-core-transport-amqp", branch = "main" }
 
 [dev-dependencies]
 # The loopback payloads the tests drive, from the capability's test

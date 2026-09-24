@@ -9,39 +9,31 @@
 //! a Send Location declares the queue and publishes to it through the
 //! default exchange under the queue's own name, with a content header that
 //! marks the message persistent. Either may instead accept clients directly
-//! through [`Session`], one client's worth of broker on one channel, which
-//! is what the playground stands up in place of a broker.
+//! through the `amqp` technology's `Session`, one client's worth of broker
+//! on one channel, which is what the playground stands up in place of a
+//! broker.
 //!
-//! What is here is the handshake, one channel, declare, publish, consume
-//! and acknowledge. Exchanges and bindings, publisher confirms,
-//! transactions and TLS are the next layers; TLS is the transport
-//! capability's, per ADR-0033. The `amqp` technology speaks the same
-//! protocol to any broker with an exchange and a routing key as its
-//! Location; this one speaks `RabbitMQ`'s idiom, where the queue is.
+//! The protocol is the `amqp` technology's — the frame, the methods, the
+//! content, the client and the session are written once, there. What is
+//! here is `RabbitMQ`'s idiom: the queue as the Location, the default
+//! exchange, the durable declaration before a publish, persistence, and
+//! the `rabbitmq://` URIs. The `amqp` technology speaks the same protocol
+//! to any broker with an exchange and a routing key as its Location.
 //!
 //! A send target is `rabbitmq://host:5672/orders`, `rabbitmq://host:5672`
 //! for this transport's queue on another broker, or a queue name alone on
 //! this transport's broker. The origin URI carries what the frame knew:
 //! `rabbitmq://broker/orders?delivery-tag=1`.
 
-pub mod client;
-pub mod content;
-pub mod method;
-pub mod session;
-pub mod wire;
-
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use client::{Client, Delivery, Login};
-pub use method::Method;
-pub use session::{Event, Queues, Session};
+use amqp::{Client, Login, Session};
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
-pub use wire::Frame;
 
 #[derive(Clone)]
 pub struct RabbitMqTransport {
@@ -132,29 +124,28 @@ impl Transport for RabbitMqTransport {
     /// closes. A quiet queue is an empty vector, not an error.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let mut client = self.connect()?;
-        client.declare(&self.queue)?;
-        client.consume(&self.queue)?;
-        let mut arrived = Vec::new();
-        loop {
-            match client.next_delivery() {
-                Ok(Some(delivery)) => {
-                    client.ack(delivery.delivery_tag)?;
-                    arrived.push(delivery.arrived);
-                }
-                Ok(None) => return Ok(arrived),
-                Err(error) if error.retryable => break,
-                Err(error) => return Err(error),
-            }
-        }
+        let deliveries = client.drain(&self.queue)?;
         client.close()?;
-        Ok(arrived)
+        Ok(deliveries
+            .into_iter()
+            .map(|delivery| {
+                let origin = format!(
+                    "rabbitmq://{}/{}?delivery-tag={}",
+                    self.broker, self.queue, delivery.delivery_tag
+                );
+                Arrived::new(origin, delivery.body)
+            })
+            .collect())
     }
 
+    /// Declare the queue durable, because the default exchange drops what
+    /// it cannot route and says nothing, then publish to it through that
+    /// exchange under the queue's own name, persistent.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, queue) = self.resolve(target);
         let mut client = Client::connect(broker, &self.login, self.timeout)?;
         client.declare(queue)?;
-        client.publish(queue, bytes)?;
+        client.publish("", queue, bytes, true)?;
         client.close()
     }
 }
@@ -171,13 +162,14 @@ impl RabbitMqTransport {
 impl Accepting for RabbitMqTransport {
     fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
-        let arrived = session
+        let publish = session
             .next_publish()?
             .ok_or_else(|| protocol_error("the client closed without publishing"))?;
         // The client closes the channel and the connection and waits for
         // each -ok; serve them, and see the client go.
         session.next_publish()?;
-        Ok(arrived)
+        let origin = format!("rabbitmq://{}/{}", session.peer(), publish.queue());
+        Ok(Arrived::new(origin, publish.body))
     }
 }
 
@@ -202,6 +194,7 @@ impl Loopback for RabbitMqTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use amqp::{Event, Queues};
     use transport::payload::{edge_payloads, sized_payloads};
 
     fn secs(n: u64) -> Duration {
@@ -241,8 +234,8 @@ mod tests {
             assert_eq!(session.user(), "xmip");
             assert_eq!(session.virtual_host(), "/");
             let published = session.next_publish().expect("published").expect("one");
-            assert_eq!(published.bytes, expected);
-            assert!(published.origin_uri.starts_with("rabbitmq://127.0.0.1:"));
+            assert_eq!(published.body, expected);
+            assert_eq!(published.exchange, "", "the default exchange");
             assert!(session.next_publish().expect("closed").is_none());
             queues = session.into_queues();
         }
@@ -268,36 +261,6 @@ mod tests {
         assert!(arrived[0].origin_uri.ends_with("/orders?delivery-tag=1"));
         assert_eq!(arrived[1].bytes, long, "many frames, one body");
         assert!(arrived[1].origin_uri.ends_with("/orders?delivery-tag=2"));
-    }
-
-    #[test]
-    fn a_session_delivers_what_it_is_given_while_the_client_listens() {
-        let far_end = far_end("prices");
-        let (listener, address) = far_end.bind().expect("binding");
-        let receiver = std::thread::spawn(move || {
-            let near = RabbitMqTransport::new(address, "prices")
-                .logging_in(Login::new("xmip", "secret"))
-                .timing_out_after(secs(2));
-            let mut client = near.connect()?;
-            let tag = client.consume("prices")?;
-            let first = client.next_delivery()?.expect("first");
-            client.ack(first.delivery_tag)?;
-            let second = client.next_delivery()?;
-            Ok::<_, transport::TransportError>((tag, first, second))
-        });
-        let mut session = far_end.accept_one(&listener).expect("accepting");
-        assert_eq!(
-            session.next_event().expect("consuming"),
-            Some(Event::Consuming("prices".to_string()))
-        );
-        session.deliver("prices", b"42").expect("delivered");
-        assert_eq!(session.next_event().expect("acked"), Some(Event::Acked(1)));
-        drop(session);
-        let (tag, first, second) = receiver.join().expect("thread").expect("listening");
-        assert!(tag.starts_with("xmip."));
-        assert_eq!(first.arrived.bytes, b"42");
-        assert_eq!(first.delivery_tag, 1);
-        assert!(second.is_none(), "the broker closed");
     }
 
     #[test]
