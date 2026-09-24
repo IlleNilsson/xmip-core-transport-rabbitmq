@@ -160,7 +160,7 @@ impl RabbitMqTransport {
 }
 
 impl Accepting for RabbitMqTransport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
         let publish = session
             .next_publish()?
@@ -175,8 +175,7 @@ impl Accepting for RabbitMqTransport {
 
 impl Loopback for RabbitMqTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     /// A fresh client to `address`, the queue declared and the payload
