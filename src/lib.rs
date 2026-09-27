@@ -33,7 +33,8 @@ use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
 pub struct RabbitMqTransport {
@@ -150,6 +151,53 @@ impl Transport for RabbitMqTransport {
     }
 }
 
+impl Configured for RabbitMqTransport {
+    /// The address is the broker, `host:5672`: where a Location connects.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "queue",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The queue a Receive Location consumes and a Send Location publishes to \
+                          when a target names no queue.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "virtual_host",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The broker's virtual host the login opens; the default one, `/`, \
+                          when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-frame is waited on, and how long a \
+                          quiet queue ends a receive; unbounded when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    /// The user and password come through the Location's credentials, not
+    /// a setting; until they are given, the login is the broker's default.
+    fn configured(address: &str, settings: &Read) -> Result<Self> {
+        let login = match settings.optional_text("virtual_host") {
+            Some(virtual_host) => Login::default().on(virtual_host),
+            None => Login::default(),
+        };
+        let transport = Self::new(address, settings.text("queue")).logging_in(login);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl RabbitMqTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, one queue called `probe`, guest at both ends.
@@ -204,6 +252,26 @@ mod tests {
         RabbitMqTransport::new("127.0.0.1:0", queue)
             .logging_in(Login::new("xmip", "secret"))
             .timing_out_after(secs(2))
+    }
+
+    #[test]
+    fn rabbitmq_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert_eq!(RabbitMqTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            ("queue".to_string(), Given::Text("orders".to_string())),
+            ("virtual_host".to_string(), Given::Text("sales".to_string())),
+            ("timeout".to_string(), Given::Text("2s".to_string())),
+        ];
+        let built =
+            RabbitMqTransport::open("broker:5672", Applies::Receive, &given).expect("configured");
+        assert_eq!(built.queue, "orders");
+        assert_eq!(built.login.virtual_host, "sales");
+        assert_eq!(built.timeout, Some(secs(2)));
+        let Err(refused) = RabbitMqTransport::open("broker:5672", Applies::Send, &[]) else {
+            panic!("the queue is required");
+        };
+        assert!(refused.message.contains("\"queue\""), "{refused}");
     }
 
     #[test]
