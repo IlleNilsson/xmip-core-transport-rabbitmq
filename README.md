@@ -9,6 +9,8 @@ the one AMQP 0-9-1 in the estate; this crate keeps what is RabbitMQ's own:
 the queue as the Location, the `rabbitmq://` URIs, and declaring and
 persisting before it publishes.
 
+A Send Location publishes on a connection kept per broker (`transport::Pool`), its channel in confirm mode and each queue declared on it once; a publish returns once the broker confirms it. Until 2026-09-27 every send connected, declared, published without a confirm and closed.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
