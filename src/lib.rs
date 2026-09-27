@@ -25,23 +25,54 @@
 //! this transport's broker. The origin URI carries what the frame knew:
 //! `rabbitmq://broker/orders?delivery-tag=1`.
 
+use std::collections::BTreeSet;
 use std::net::TcpListener;
 use std::time::Duration;
 
-use amqp::{Client, Login, Session};
+use amqp::content::Properties;
+use amqp::{Client, Credentials, Session};
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Pool, Pooled, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
 pub struct RabbitMqTransport {
     broker: String,
     queue: String,
-    login: Login,
+    credentials: Credentials,
     timeout: Option<Duration>,
+    /// The connections a send publishes on: connected once per broker and
+    /// kept, each queue declared on each once.
+    publishers: Pool<Publisher>,
+}
+
+/// A connection a send publishes on, and the queues already declared on it.
+struct Publisher {
+    client: Client,
+    declared: BTreeSet<String>,
+}
+
+impl Publisher {
+    /// Declare `queue` durable where this connection has not yet, then
+    /// publish `bytes` to it persistent, and return once the broker
+    /// confirms it took them.
+    fn publish(&mut self, queue: &str, bytes: &[u8]) -> Result<()> {
+        if !self.declared.contains(queue) {
+            self.client.declare(queue)?;
+            self.declared.insert(queue.to_string());
+        }
+        self.client
+            .publish_confirmed("", queue, &Properties::octets(true), bytes)
+    }
+}
+
+impl Pooled for Publisher {
+    fn usable(&mut self) -> bool {
+        self.client.usable()
+    }
 }
 
 impl RabbitMqTransport {
@@ -52,15 +83,17 @@ impl RabbitMqTransport {
         Self {
             broker: broker.into(),
             queue: queue.into(),
-            login: Login::default(),
+            credentials: Credentials::default(),
             timeout: None,
+            publishers: Pool::new(),
         }
     }
 
-    /// Present this login when connecting, and expect it when accepting.
+    /// Present these credentials when connecting, and expect them when
+    /// accepting.
     #[must_use]
-    pub fn logging_in(mut self, login: Login) -> Self {
-        self.login = login;
+    pub fn logging_in(mut self, credentials: Credentials) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -78,7 +111,7 @@ impl RabbitMqTransport {
     /// Where the broker could not be reached, refused the login, or did
     /// not speak AMQP 0-9-1.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&self.broker, &self.login, self.timeout)
+        Client::connect(&self.broker, &self.credentials, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -96,7 +129,7 @@ impl RabbitMqTransport {
     /// Where the connection could not be accepted, the handshake failed,
     /// or the client was refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Session> {
-        Session::accept(listener, &self.login, self.timeout)
+        Session::accept(listener, &self.credentials, self.timeout)
     }
 
     /// Where a target names the broker and queue itself —
@@ -141,13 +174,21 @@ impl Transport for RabbitMqTransport {
 
     /// Declare the queue durable, because the default exchange drops what
     /// it cannot route and says nothing, then publish to it through that
-    /// exchange under the queue's own name, persistent.
+    /// exchange under the queue's own name, persistent and confirmed: on
+    /// the connection kept for the broker, and the queue declared on it
+    /// once.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, queue) = self.resolve(target);
-        let mut client = Client::connect(broker, &self.login, self.timeout)?;
-        client.declare(queue)?;
-        client.publish("", queue, bytes, true)?;
-        client.close()
+        self.publishers.exchange(
+            broker,
+            || {
+                Ok(Publisher {
+                    client: Client::connect(broker, &self.credentials, self.timeout)?,
+                    declared: BTreeSet::new(),
+                })
+            },
+            |publisher| publisher.publish(queue, bytes),
+        )
     }
 }
 
@@ -186,11 +227,11 @@ impl Configured for RabbitMqTransport {
     /// The user and password come through the Location's credentials, not
     /// a setting; until they are given, the login is the broker's default.
     fn configured(address: &str, settings: &Read) -> Result<Self> {
-        let login = match settings.optional_text("virtual_host") {
-            Some(virtual_host) => Login::default().on(virtual_host),
-            None => Login::default(),
+        let credentials = match settings.optional_text("virtual_host") {
+            Some(virtual_host) => Credentials::default().on(virtual_host),
+            None => Credentials::default(),
         };
-        let transport = Self::new(address, settings.text("queue")).logging_in(login);
+        let transport = Self::new(address, settings.text("queue")).logging_in(credentials);
         Ok(match settings.optional_duration("timeout") {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
@@ -210,12 +251,11 @@ impl RabbitMqTransport {
 impl Accepting for RabbitMqTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
+        // The confirm goes out as the publish is read; the client keeps its
+        // connection for the next.
         let publish = session
             .next_publish()?
             .ok_or_else(|| protocol_error("the client closed without publishing"))?;
-        // The client closes the channel and the connection and waits for
-        // each -ok; serve them, and see the client go.
-        session.next_publish()?;
         let origin = format!("rabbitmq://{}/{}", session.peer(), publish.queue());
         Ok(Arrived::new(origin, publish.body))
     }
@@ -226,9 +266,8 @@ impl Loopback for RabbitMqTransport {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
-    /// A fresh client to `address`, the queue declared and the payload
-    /// published to it through the default exchange, closed before it
-    /// returns.
+    /// A client to `address`, the queue declared and the payload published
+    /// to it through the default exchange, confirmed before it returns.
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
         Self {
             broker: address.to_string(),
@@ -250,7 +289,7 @@ mod tests {
 
     fn far_end(queue: &str) -> RabbitMqTransport {
         RabbitMqTransport::new("127.0.0.1:0", queue)
-            .logging_in(Login::new("xmip", "secret"))
+            .logging_in(Credentials::new("xmip", "secret"))
             .timing_out_after(secs(2))
     }
 
@@ -266,7 +305,7 @@ mod tests {
         let built =
             RabbitMqTransport::open("broker:5672", Applies::Receive, &given).expect("configured");
         assert_eq!(built.queue, "orders");
-        assert_eq!(built.login.virtual_host, "sales");
+        assert_eq!(built.credentials.virtual_host, "sales");
         assert_eq!(built.timeout, Some(secs(2)));
         let Err(refused) = RabbitMqTransport::open("broker:5672", Applies::Send, &[]) else {
             panic!("the queue is required");
@@ -282,30 +321,26 @@ mod tests {
         let sent = long.clone();
         let sender = std::thread::spawn(move || {
             let near = RabbitMqTransport::new(address.clone(), "orders")
-                .logging_in(Login::new("xmip", "secret"))
+                .logging_in(Credentials::new("xmip", "secret"))
                 .timing_out_after(secs(2));
             near.send("orders", b"order 1")?;
             near.send(&format!("rabbitmq://{address}"), &sent)?;
             near.send(&format!("rabbitmq://{address}/other"), b"")?;
             RabbitMqTransport::new(address, "orders")
-                .logging_in(Login::new("xmip", "secret"))
+                .logging_in(Credentials::new("xmip", "secret"))
                 .timing_out_after(Duration::from_millis(300))
                 .receive()
         });
-        let mut queues = Queues::new();
+        // One broker, so one connection for all three sends: logged in once.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        assert_eq!(session.user(), "xmip");
+        assert_eq!(session.virtual_host(), "/");
         for expected in [&b"order 1"[..], &long, b""] {
-            let mut session = far_end
-                .accept_one(&listener)
-                .expect("accepting")
-                .with_queues(queues);
-            assert_eq!(session.user(), "xmip");
-            assert_eq!(session.virtual_host(), "/");
             let published = session.next_publish().expect("published").expect("one");
             assert_eq!(published.body, expected);
             assert_eq!(published.exchange, "", "the default exchange");
-            assert!(session.next_publish().expect("closed").is_none());
-            queues = session.into_queues();
         }
+        let queues: Queues = session.into_queues();
         assert_eq!(queues["orders"].len(), 2);
         assert_eq!(queues["other"].len(), 1);
         let mut session = far_end
@@ -331,12 +366,53 @@ mod tests {
     }
 
     #[test]
+    fn a_thousand_sends_log_in_and_declare_once_and_a_closed_connection_is_replaced() {
+        const SENDS: usize = 1000;
+        let far_end = far_end("orders").timing_out_after(secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = RabbitMqTransport::new(address, "orders")
+            .logging_in(Credentials::new("xmip", "secret"))
+            .timing_out_after(secs(5));
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            for n in 0..SENDS {
+                sending.send("orders", n.to_string().as_bytes())?;
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a send.
+            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
+            sending.send("orders", b"after the close")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let mut declared = 0;
+        let mut published = 0;
+        while published < SENDS {
+            match session.next_event().expect("serving").expect("one") {
+                Event::Declared(_) => declared += 1,
+                Event::Published(publish) => {
+                    assert_eq!(publish.body, published.to_string().as_bytes());
+                    published += 1;
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(declared, 1, "the queue is declared once on a connection");
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new connection");
+        let last = again.next_publish().expect("publish").expect("one");
+        assert_eq!(last.body, b"after the close");
+        sender.join().expect("thread").expect("sending");
+        assert_eq!(near.publishers.opened(), 2);
+    }
+
+    #[test]
     fn a_refused_login_and_a_broker_that_is_not_amqp_are_permanent() {
         let far_end = far_end("x");
         let (listener, address) = far_end.bind().expect("binding");
         let stranger = std::thread::spawn(move || {
             RabbitMqTransport::new(address, "x")
-                .logging_in(Login::new("xmip", "wrong"))
+                .logging_in(Credentials::new("xmip", "wrong"))
                 .timing_out_after(secs(2))
                 .connect()
                 .err()
