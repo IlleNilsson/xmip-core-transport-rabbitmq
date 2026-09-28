@@ -31,9 +31,11 @@ use std::time::Duration;
 
 use amqp::content::Properties;
 use amqp::{Client, Credentials, Session};
+use net::Target;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::pool::delivered;
 use transport::socket;
 use transport::{Arrived, Configured, Directions, Pool, Pooled, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
@@ -47,6 +49,9 @@ pub struct RabbitMqTransport {
     /// The connections a send publishes on: connected once per broker and
     /// kept, each queue declared on each once.
     publishers: Pool<Publisher>,
+    /// The connection a receive takes from, its queue declared and
+    /// consumed on the first receive and kept consuming.
+    consumers: Pool<Client>,
 }
 
 /// A connection a send publishes on, and the queues already declared on it.
@@ -86,6 +91,7 @@ impl RabbitMqTransport {
             credentials: Credentials::default(),
             timeout: None,
             publishers: Pool::new(),
+            consumers: Pool::new(),
         }
     }
 
@@ -136,7 +142,7 @@ impl RabbitMqTransport {
     /// `rabbitmq://host:5672/orders` — or the broker alone, or is a queue
     /// name alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match socket::target("rabbitmq", target) {
+        match Target::under(&["rabbitmq"], target).map(|named| (named.authority(), named.path())) {
             Some((broker, "")) => (broker, &self.queue),
             Some((broker, queue)) => (broker, queue),
             None => (&self.broker, target),
@@ -153,13 +159,17 @@ impl Transport for RabbitMqTransport {
         Directions::BOTH
     }
 
-    /// Declare and consume the queue and take what is delivered, each
-    /// acknowledged, until it has been quiet for the timeout or the broker
-    /// closes. A quiet queue is an empty vector, not an error.
+    /// Take what is delivered, each acknowledged, until it has been quiet
+    /// for the timeout or the broker closes, on the consumer the first
+    /// receive declared and kept: what the broker delivered between two
+    /// receives waits in the socket. A quiet queue is an empty vector, not
+    /// an error.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let mut client = self.connect()?;
-        let deliveries = client.drain(&self.queue)?;
-        client.close()?;
+        let deliveries = self.consumers.exchange(
+            self.broker.as_str(),
+            || self.connect()?.consuming(&self.queue),
+            |client| delivered(client, Client::next_acked),
+        )?;
         Ok(deliveries
             .into_iter()
             .map(|delivery| {
@@ -404,6 +414,48 @@ mod tests {
         assert_eq!(last.body, b"after the close");
         sender.join().expect("thread").expect("sending");
         assert_eq!(near.publishers.opened(), 2);
+    }
+
+    #[test]
+    fn five_receives_consume_once_and_a_consumer_the_broker_closed_is_replaced() {
+        let far_end = far_end("orders").timing_out_after(Duration::from_secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = RabbitMqTransport::new(address, "orders")
+            .logging_in(Credentials::new("xmip", "secret"))
+            .timing_out_after(Duration::from_millis(100));
+        let receiving = near.clone();
+        let (taken, told) = std::sync::mpsc::channel();
+        let receiver = std::thread::spawn(move || {
+            let mut arrived = Vec::new();
+            while arrived.len() < 6 {
+                let now = receiving.receive()?;
+                if !now.is_empty() {
+                    taken.send(()).expect("told");
+                }
+                arrived.extend(now.into_iter().map(|one| one.bytes));
+            }
+            Ok::<_, transport::TransportError>(arrived)
+        });
+        let consuming = |session: &mut Session| {
+            let declared = session.next_event().expect("declared");
+            assert_eq!(declared, Some(Event::Declared("orders".to_string())));
+            let consuming = session.next_event().expect("consuming");
+            assert_eq!(consuming, Some(Event::Consuming("orders".to_string())));
+        };
+        // One login, declaration and consumer for every receive.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        consuming(&mut session);
+        for round in 0..5u8 {
+            session.deliver("orders", &[round]).expect("delivered");
+            told.recv().expect("taken");
+        }
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new connection");
+        consuming(&mut again);
+        again.deliver("orders", &[5]).expect("delivered");
+        let arrived = receiver.join().expect("thread").expect("receiving");
+        assert_eq!(arrived, (0..6u8).map(|n| vec![n]).collect::<Vec<_>>());
+        assert_eq!(near.consumers.opened(), 2);
     }
 
     #[test]
