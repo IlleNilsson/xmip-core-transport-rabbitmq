@@ -17,6 +17,10 @@ A delivery is acknowledged after the runtime's whole receive cycle, never on its
 
 A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls: scheme, authority, path and decoded query. Until 2026-09-28 it was read through the transport capability's `socket::target`, which split it on its first slash and left the query in the path.
 
+## The deduplication key
+
+A keyed send (`Transport::send_keyed`, built 2026-10-04) carries the Journey's identifier as the message's message-id property, through the amqp technology's `Properties::keyed`, the same on every attempt of one Journey. `RabbitMQ` itself appends a repeated publish; a consumer recognises it by its message-id, and the message deduplication plugin, where a queue is declared with it, drops it. An unkeyed `send` sets none.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it

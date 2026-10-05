@@ -64,15 +64,16 @@ struct Publisher {
 
 impl Publisher {
     /// Declare `queue` durable where this connection has not yet, then
-    /// publish `bytes` to it persistent, and return once the broker
-    /// confirms it took them.
-    fn publish(&mut self, queue: &str, bytes: &[u8]) -> Result<()> {
+    /// publish `bytes` to it persistent, under `key` as its message-id
+    /// where there is one, and return once the broker confirms it took
+    /// them.
+    fn publish(&mut self, queue: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
         if !self.declared.contains(queue) {
             self.client.declare(queue)?;
             self.declared.insert(queue.to_string());
         }
-        self.client
-            .publish_confirmed("", queue, &Properties::octets(true), bytes)
+        let properties = Properties::octets(true).keyed(key);
+        self.client.publish_confirmed("", queue, &properties, bytes)
     }
 }
 
@@ -202,6 +203,20 @@ impl Transport for RabbitMqTransport {
     /// the connection kept for the broker, and the queue declared on it
     /// once.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+        self.publish(target, bytes, None)
+    }
+
+    /// The key goes in the message-id property, which a consumer, or the
+    /// broker's message deduplication plugin, recognises a repeated
+    /// publish by.
+    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
+        self.publish(target, bytes, Some(key))
+    }
+}
+
+impl RabbitMqTransport {
+    /// The one send, on the publisher kept for the target's broker.
+    fn publish(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
         let (broker, queue) = self.resolve(target);
         self.publishers.exchange(
             broker,
@@ -211,7 +226,7 @@ impl Transport for RabbitMqTransport {
                     declared: BTreeSet::new(),
                 })
             },
-            |publisher| publisher.publish(queue, bytes),
+            |publisher| publisher.publish(queue, bytes, key),
         )
     }
 }
