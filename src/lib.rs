@@ -33,13 +33,15 @@ use std::time::Duration;
 
 use amqp::content::Properties;
 use amqp::{Client, Credentials, Session, acknowledging};
+use context::property::AMQP_USER_ID;
 use net::Target;
+use transport::ArrivalIdentity;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::pool::delivered;
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Pool, Pooled, Taken, Transport};
+use transport::{Arrived, Configured, Directions, Headers, Pool, Pooled, Taken, Transport};
 use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
 
 #[derive(Clone)]
@@ -192,7 +194,14 @@ impl Transport for RabbitMqTransport {
                 );
                 let acknowledgement =
                     acknowledging(&self.consumers, &self.broker, delivery.delivery_tag);
+                let user = delivery
+                    .properties
+                    .user_id
+                    .map(|user| (AMQP_USER_ID.to_string(), user));
                 Arrived::whole(origin, delivery.body, acknowledgement)
+                    .detected()
+                    .with_headers(Headers::of("amqp").text(delivery.properties.headers))
+                    .observing_all(user)
             })
             .collect())
     }
@@ -301,6 +310,12 @@ impl Accepting for RabbitMqTransport {
 }
 
 impl Loopback for RabbitMqTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::Unnamed(
+            "the broker delivers it: its headers say who sent it, the peer is the broker",
+        )
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
