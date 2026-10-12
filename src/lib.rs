@@ -170,6 +170,10 @@ impl Transport for RabbitMqTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the broker is drained until quiet for the timeout")
+    }
+
     /// Take what is delivered until it has been quiet for the timeout or
     /// the broker closes, on the consumer the first receive declared and
     /// kept: what the broker delivered between two receives waits in the
