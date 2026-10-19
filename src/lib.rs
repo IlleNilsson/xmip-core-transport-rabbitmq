@@ -183,11 +183,11 @@ impl Transport for RabbitMqTransport {
     /// accepted, `basic.reject` without requeue when refused — `RabbitMQ`
     /// drops it, or dead-letters it where the queue has a dead-letter
     /// exchange — and with requeue when the cycle failed.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let deliveries = self.consumers.exchange(
             self.broker.as_str(),
             || self.connect()?.consuming(&self.queue),
-            |client| delivered(client, Client::next_delivery),
+            |client| delivered(client, most, Client::next_delivery),
         )?;
         Ok(deliveries
             .into_iter()
@@ -210,20 +210,21 @@ impl Transport for RabbitMqTransport {
             .collect())
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("a publish is one message the broker confirms whole")
+    }
+
     /// Declare the queue durable, because the default exchange drops what
     /// it cannot route and says nothing, then publish to it through that
     /// exchange under the queue's own name, persistent and confirmed: on
     /// the connection kept for the broker, and the queue declared on it
     /// once.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.publish(target, bytes, None)
-    }
-
     /// The key goes in the message-id property, which a consumer, or the
     /// broker's message deduplication plugin, recognises a repeated
     /// publish by.
-    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
-        self.publish(target, bytes, Some(key))
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
+        self.publish(target, bytes, outgoing.key())
     }
 }
 
