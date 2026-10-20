@@ -220,7 +220,7 @@ impl Transport for RabbitMqTransport {
     /// the connection kept for the broker, and the queue declared on it
     /// once.
     /// The key goes in the message-id property, which a consumer, or the
-    /// broker's message deduplication plugin, recognises a repeated
+    /// broker's message deduplication plugin, recognizes a repeated
     /// publish by.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;

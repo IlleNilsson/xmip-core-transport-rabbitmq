@@ -19,7 +19,7 @@ A send target is read by `net::Target` in [xmip-core-library-net](https://github
 
 ## The deduplication key
 
-A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the message's message-id property, through the amqp technology's `Properties::keyed`, the same on every attempt of one Journey. `RabbitMQ` itself appends a repeated publish; a consumer recognises it by its message-id, and the message deduplication plugin, where a queue is declared with it, drops it. An unkeyed `send` sets none.
+A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the message's message-id property, through the amqp technology's `Properties::keyed`, the same on every attempt of one Journey. `RabbitMQ` itself appends a repeated publish; a consumer recognizes it by its message-id, and the message deduplication plugin, where a queue is declared with it, drops it. An unkeyed `send` sets none.
 
 ## Toolchain
 
