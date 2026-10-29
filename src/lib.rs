@@ -147,7 +147,7 @@ impl RabbitMqTransport {
     /// `rabbitmq://host:5672/orders` — or the broker alone, or is a queue
     /// name alone on this transport's broker.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::under(&["rabbitmq"], target).map(|named| (named.authority(), named.path())) {
+        match Target::under(Self::SCHEMES, target).map(|named| (named.authority(), named.path())) {
             Some((broker, "")) => (broker, &self.queue),
             Some((broker, queue)) => (broker, queue),
             None => (&self.broker, target),
@@ -276,6 +276,9 @@ impl Configured for RabbitMqTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["rabbitmq"];
 
     /// The user and password come through the Location's credentials, not
     /// a setting; until they are given, the login is the broker's default.
