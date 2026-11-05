@@ -12,7 +12,7 @@
 //! default exchange under the queue's own name, with a content header that
 //! marks the message persistent. Either may instead accept clients directly
 //! through the `amqp` technology's `Session`, one client's worth of broker
-//! on one channel, which is what the playground stands up in place of a
+//! on one channel, which is what the essentials stands up in place of a
 //! broker.
 //!
 //! The protocol is the `amqp` technology's — the frame, the methods, the
