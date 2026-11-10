@@ -29,7 +29,7 @@ xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core
 # The protocol: the one AMQP 0-9-1 in the estate — frame, methods,
 # content, the client and the far-end session. What is RabbitMQ's own is
 # the idiom this crate speaks through it (a declared sibling dependency,
-# architecture.xmip).
+# architecture.toml).
 amqp = { package = "xmip-core-transport-amqp", git = "https://github.com/IlleNilsson/xmip-core-transport-amqp", branch = "main" }
 
 # The module's timing program (doc/governance/rust-style.md section 5c): a
