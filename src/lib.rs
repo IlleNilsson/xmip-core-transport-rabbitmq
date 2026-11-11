@@ -36,6 +36,7 @@ use amqp::{Client, Credentials, Session, acknowledging};
 use context::property::AMQP_USER_ID;
 use net::Target;
 use transport::ArrivalIdentity;
+use transport::destination;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -145,13 +146,11 @@ impl RabbitMqTransport {
 
     /// Where a target names the broker and queue itself —
     /// `rabbitmq://host:5672/orders` — or the broker alone, or is a queue
-    /// name alone on this transport's broker.
+    /// name alone on this transport's broker, or empty and this transport's
+    /// queue (`transport::destination::on_server`).
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str) {
-        match Target::under(Self::SCHEMES, target).map(|named| (named.authority(), named.path())) {
-            Some((broker, "")) => (broker, &self.queue),
-            Some((broker, queue)) => (broker, queue),
-            None => (&self.broker, target),
-        }
+        let named = Target::under(Self::SCHEMES, target);
+        destination::on_server(target, named, (&self.broker, &self.queue))
     }
 }
 
@@ -279,6 +278,11 @@ impl Configured for RabbitMqTransport {
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["rabbitmq"];
+
+    /// The queue setting: the address names only the broker.
+    fn own_target(_address: &str) -> &str {
+        destination::OWN
+    }
 
     /// The user and password come through the Location's credentials, not
     /// a setting; until they are given, the login is the broker's default.
@@ -579,6 +583,32 @@ mod tests {
         assert_eq!(transport.resolve("rabbitmq://h:1/a"), ("h:1", "a"));
         assert_eq!(transport.resolve("rabbitmq://h:1"), ("h:1", "x"));
         assert_eq!(transport.resolve("b"), ("127.0.0.1:0", "b"));
+        assert_eq!(transport.resolve(""), ("127.0.0.1:0", "x"));
+    }
+
+    #[test]
+    fn a_send_location_publishes_to_its_queue_and_a_target_naming_another_wins() {
+        use xcore::settings::Given;
+        let far_end = RabbitMqTransport::new("127.0.0.1:0", "orders").timing_out_after(secs(2));
+        let (listener, address) = far_end.bind().expect("binding");
+        let location = format!("rabbitmq://{address}");
+        let sender = std::thread::spawn(move || {
+            let given = [
+                ("queue".to_string(), Given::Text("orders".to_string())),
+                ("timeout".to_string(), Given::Text("2s".to_string())),
+            ];
+            let near = RabbitMqTransport::open(&location, Applies::Send, &given)?;
+            near.send(RabbitMqTransport::own_target(&location), b"own")?;
+            near.send("invoices", b"other")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        for sent in ["own", "other"] {
+            session.next_publish().expect(sent).expect(sent);
+        }
+        sender.join().expect("thread").expect("publishing");
+        let queues: Queues = session.into_queues();
+        assert_eq!(queues.get("orders").map(Vec::len), Some(1), "{queues:?}");
+        assert_eq!(queues.get("invoices").map(Vec::len), Some(1), "{queues:?}");
     }
 
     #[test]
