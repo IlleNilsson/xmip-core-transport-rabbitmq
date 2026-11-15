@@ -6,13 +6,20 @@
 //! (`cargo test --test measured --all-features -- --test-threads=1`), so
 //! what is measured is Xmip's work and not its neighbors':
 //!
-//! - a thousand sends on one connection take a millisecond each at most.
+//! - a thousand sends on one connection take a millisecond each at most
+//!   beyond their wakes, round by round beside a plain wake, the fastest of
+//!   five (`xcore::latency::Rounds`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use amqp::{Credentials, Event};
 use transport::Transport;
+use xcore::latency::Rounds;
 use xmip_core_transport_rabbitmq::RabbitMqTransport;
+
+/// What a send wakes where a plain wake wakes one: the far end at the
+/// publish, and this end at its confirm.
+const WAKES: u32 = 2;
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -29,14 +36,11 @@ fn a_thousand_sends_take_a_millisecond_each_at_most() {
         .logging_in(Credentials::new("xmip", "secret"))
         .timing_out_after(secs(5));
     let sender = std::thread::spawn(move || {
-        let began = Instant::now();
+        let mut rounds = Rounds::crossing(WAKES);
         for n in 0..SENDS {
-            near.send("orders", n.to_string().as_bytes())?;
+            rounds.round(|| near.send("orders", n.to_string().as_bytes()))?;
         }
-        let took = began.elapsed();
-        // Generous for a debug build under load: a millisecond a send.
-        assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
-        Ok::<_, transport::TransportError>(())
+        Ok::<_, transport::TransportError>(rounds)
     });
     let mut session = far_end.accept_one(&listener).expect("accepting");
     let mut published = 0;
@@ -50,5 +54,6 @@ fn a_thousand_sends_take_a_millisecond_each_at_most() {
             other => panic!("{other:?}"),
         }
     }
-    sender.join().expect("thread").expect("sending");
+    let rounds = sender.join().expect("thread").expect("sending");
+    rounds.hold("a send, confirmed");
 }
