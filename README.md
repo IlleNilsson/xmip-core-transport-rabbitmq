@@ -7,7 +7,11 @@ client and the far-end session are
 [xmip-core-transport-amqp](https://github.com/IlleNilsson/xmip-core-transport-amqp)'s,
 the one AMQP 0-9-1 in the estate; this crate keeps what is RabbitMQ's own:
 the queue as the Location, the `rabbitmq://` URIs, and declaring and
-persisting before it publishes.
+persisting before it publishes. Who a Location logs in as is the amqp
+technology's `Presenting` too: its `user`, with the password of the secret
+it names, read as each connection opens (ADR-0019, amendment 2026-11-25);
+the broker's default guest where it names no `user`. Until 2026-11-25 a
+Location naming a secret was refused as the node started.
 
 A Send Location publishes on a connection kept per broker (`transport::Pool`), its channel in confirm mode and each queue declared on it once; a publish returns once the broker confirms it. Until 2026-09-27 every send connected, declared, published without a confirm and closed.
 
