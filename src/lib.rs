@@ -27,26 +27,47 @@
 //! for this transport's queue on another broker, or a queue name alone on
 //! this transport's broker. The origin URI carries what the frame knew:
 //! `rabbitmq://broker/orders?delivery-tag=1`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, the `amqp`
+//! technology's `user` and `virtual_host` among them, and none of the code
+//! above, which is behind the default feature: what the surfaces' library
+//! carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "declaration")]
+pub mod declaration;
+
+#[cfg(feature = "default")]
 use std::collections::BTreeSet;
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 use amqp::content::Properties;
-use amqp::presenting::{self, Presenting};
+#[cfg(feature = "default")]
+use amqp::presenting::Presenting;
+#[cfg(feature = "default")]
 use amqp::{Client, Session, acknowledging};
+#[cfg(feature = "default")]
 use context::property::AMQP_USER_ID;
+#[cfg(feature = "default")]
 use net::Target;
-use transport::ArrivalIdentity;
-use transport::destination;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::pool::delivered;
-use transport::socket;
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, destination, pool::delivered, socket};
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, Headers, Login, Pool, Pooled, Taken, Transport};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::{Read, Settings};
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct RabbitMqTransport {
     broker: String,
@@ -64,11 +85,13 @@ pub struct RabbitMqTransport {
 }
 
 /// A connection a send publishes on, and the queues already declared on it.
+#[cfg(feature = "default")]
 struct Publisher {
     client: Client,
     declared: BTreeSet<String>,
 }
 
+#[cfg(feature = "default")]
 impl Publisher {
     /// Declare `queue` durable where this connection has not yet, then
     /// publish `bytes` to it persistent, under `key` as its message-id
@@ -84,12 +107,14 @@ impl Publisher {
     }
 }
 
+#[cfg(feature = "default")]
 impl Pooled for Publisher {
     fn usable(&mut self) -> bool {
         self.client.usable()
     }
 }
 
+#[cfg(feature = "default")]
 impl RabbitMqTransport {
     /// Speak to the broker at `broker` about `queue`, as guest until
     /// [`RabbitMqTransport::logging_in`] says otherwise.
@@ -160,6 +185,7 @@ impl RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for RabbitMqTransport {
     fn name(&self) -> &'static str {
         "rabbitmq"
@@ -233,6 +259,7 @@ impl Transport for RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl RabbitMqTransport {
     /// The one send, on the publisher kept for the target's broker.
     fn publish(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
@@ -250,39 +277,10 @@ impl RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for RabbitMqTransport {
-    /// The address is the broker, `host:5672`: where a Location connects.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "queue",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The queue a Receive Location consumes and a Send Location publishes to \
-                          when a target names no queue.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: presenting::VIRTUAL_HOST,
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The broker's virtual host the login opens; the default one, `/`, \
-                          when left out.",
-                applies: Applies::Both,
-            },
-            presenting::USER,
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a peer that stops mid-frame is waited on, and how long a \
-                 quiet queue ends a receive; unbounded when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["rabbitmq"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The queue setting: the address names only the broker.
     fn own_target(_address: &str) -> &str {
@@ -310,6 +308,7 @@ impl Configured for RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl RabbitMqTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, one queue called `probe`, guest at both ends.
@@ -319,6 +318,7 @@ impl RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for RabbitMqTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut session = self.accept_one(listener)?;
@@ -332,6 +332,7 @@ impl Accepting for RabbitMqTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for RabbitMqTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -360,6 +361,7 @@ mod tests {
     use amqp::{Credentials, Event, Queues};
     use transport::Verdict;
     use transport::payload::{edge_payloads, sized_payloads};
+    use xcore::settings::Applies;
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
